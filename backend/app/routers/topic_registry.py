@@ -74,6 +74,15 @@ def get_entry(entry_id: int) -> dict:
     return entry
 
 
+@router.get("/{entry_id}/snapshots", response_model=dict)
+def get_topic_snapshots(entry_id: int) -> dict:
+    """主题注册回查：读取消息接入写入同一份接收就绪数据快照的配置版本。"""
+    feedback = service.get_topic_snapshots(entry_id)
+    if feedback is None:
+        raise HTTPException(status_code=404, detail=f"数据主题 {entry_id} 不存在或已归档")
+    return feedback
+
+
 @router.post("", response_model=ActionResult)
 def create_entry(payload: dict[str, object]) -> ActionResult:
     """登记一条数据主题，缺字段时说明原因而不是静默丢弃。"""
@@ -89,4 +98,4 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     entry, message = service.run_action(entry_id, payload.action.strip())
     if entry is None:
         return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
+    return ActionResult(ok=True, message=message, entry=entry, extra=entry.get("_snapshot_feedback"))

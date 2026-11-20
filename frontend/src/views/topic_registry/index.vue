@@ -56,6 +56,58 @@
       </tbody>
     </table>
 
+    <div v-if="feedback" class="snapshot-panel" data-testid="feedback-panel">
+      <div class="snapshot-head">
+        <div>
+          <h3 class="snapshot-title">快照回查：{{ feedback.topic_code }}（上线版本 v{{ feedback.online_version ?? '-' }}）</h3>
+          <p class="snapshot-desc">主题动作已写入接收就绪数据快照，以下为消息接入写入的配置版本回查结果。</p>
+        </div>
+        <button class="btn ghost" type="button" @click="feedback = null">收起</button>
+      </div>
+      <div class="snapshot-list">
+        <div v-for="snap in feedback.snapshots" :key="String(snap.config_code)" class="snapshot-item">
+          <span><span class="k">配置编号</span>{{ snap.config_code }}</span>
+          <span><span class="k">消费组</span>{{ snap.consumer_group ?? '—' }}</span>
+          <span><span class="k">配置版本</span>v{{ snap.config_version }}</span>
+          <span><span class="k">主题上线版本</span>{{ snap.topic_online_version ? `v${snap.topic_online_version}` : '—' }}</span>
+          <span>
+            <span class="k">生效判定</span>
+            <em class="verdict" :class="`verdict-${snap.verdict}`">{{ snap.verdict }}</em>
+          </span>
+          <span><span class="k">首条消费位置</span>{{ snap.first_offset ?? '—' }}</span>
+          <span><span class="k">数据版本</span>v{{ snap.data_version }}</span>
+          <span class="blocked-text"><span class="k">阻塞原因</span>{{ snap.blocked_reason ?? '—' }}</span>
+        </div>
+        <p v-if="!feedback.snapshots.length" class="snapshot-empty">该主题暂无关联的消费组接收快照</p>
+      </div>
+    </div>
+
+    <div class="snapshot-panel" data-testid="snapshot-sync-panel">
+      <div class="snapshot-head">
+        <div>
+          <h3 class="snapshot-title">接收就绪数据快照同步</h3>
+          <p class="snapshot-desc">与消息接入工作台读取同一份快照；刷新页面后数据保持一致。</p>
+        </div>
+      </div>
+      <div class="snapshot-list">
+        <div v-for="snap in boundSnapshots" :key="String(snap.id)" class="snapshot-item" data-testid="snapshot-sync-item">
+          <span><span class="k">主题编号</span>{{ snap.topic_code }}</span>
+          <span><span class="k">配置编号</span>{{ snap.config_code }}</span>
+          <span><span class="k">配置版本</span>v{{ snap.config_version }}</span>
+          <span><span class="k">主题上线版本</span>{{ snap.topic_online_version ? `v${snap.topic_online_version}` : '—' }}</span>
+          <span>
+            <span class="k">生效判定</span>
+            <em class="verdict" :class="`verdict-${snap.verdict}`">{{ snap.verdict }}</em>
+          </span>
+          <span><span class="k">数据版本</span>v{{ snap.data_version }}</span>
+          <span class="blocked-text" style="grid-column: span 2;">
+            <span class="k">阻塞原因</span>{{ snap.blocked_reason ?? '—' }}
+          </span>
+        </div>
+        <p v-if="!boundSnapshots.length" class="snapshot-empty">暂无绑定主题的接收就绪数据快照</p>
+      </div>
+    </div>
+
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
         <h3>登记数据主题</h3>
@@ -74,6 +126,7 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条主题注册记录</span>
+      <span v-if="noticeMessage" class="notice-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -85,6 +138,8 @@ import { computed, onMounted, ref } from 'vue'
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type Snapshot = Record<string, string | number | boolean | null>
+type Feedback = { topic_code: string; online_version: number | null; snapshots: Snapshot[] }
 
 const ENDPOINT = '/api/topic_registry'
 const columns = ["主题编号", "主题名称", "消息格式", "序列化协议", "分区键列", "保留时长", "压缩类型", "Schema版本"]
@@ -95,11 +150,14 @@ const metricNames = ["数据主题总数", "待校验主题", "已上线主题"]
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const noticeMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const boundSnapshots = ref<Snapshot[]>([])
+const feedback = ref<Feedback | null>(null)
 const stats = computed(() => [
   { label: metricNames[0], value: total.value },
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
@@ -154,17 +212,36 @@ async function submitCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('主题注册动作未生效，请稍后重试')
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.message || '主题注册动作未生效，请稍后重试')
+    }
+    noticeMessage.value = payload.message || ''
+    // 下线与重新上线各回查一次接收就绪数据快照
+    if (payload.extra && Array.isArray(payload.extra.snapshots)) {
+      feedback.value = payload.extra as Feedback
     }
     await reload()
+    await reloadSnapshots()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '主题注册操作失败'
+  }
+}
+
+async function reloadSnapshots() {
+  try {
+    const response = await request('/api/kafka_connector/snapshots')
+    if (!response.ok) throw new Error('接收就绪数据快照读取失败')
+    const payload = await response.json()
+    boundSnapshots.value = (payload.items ?? []).filter((item: Snapshot) => item.topic_code)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '接收就绪数据快照读取失败'
   }
 }
 
@@ -184,5 +261,8 @@ async function reload() {
   }
 }
 
-onMounted(reload)
+onMounted(() => {
+  void reload()
+  void reloadSnapshots()
+})
 </script>

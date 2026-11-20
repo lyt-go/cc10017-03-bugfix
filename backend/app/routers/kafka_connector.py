@@ -41,6 +41,23 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/snapshots")
+def list_snapshots() -> dict:
+    """接收就绪数据快照列表：消息接入工作台与主题注册回查共用同一份数据。"""
+    return {"items": service.list_snapshots(), "total": len(service.list_snapshots())}
+
+
+@router.post("/snapshots/resume", response_model=ActionResult)
+def resume_snapshots() -> ActionResult:
+    """中断恢复接收就绪数据快照：仅处理尚未完成项，已完成的快照保持原样。"""
+    result = service.resume_snapshots()
+    message = (
+        f"已恢复处理 {len(result['processed'])} 份未完成快照，"
+        f"新生效 {len(result['newly_effective'])} 份，仍阻塞 {len(result['still_blocked'])} 份"
+    )
+    return ActionResult(ok=True, message=message, extra=result)
+
+
 @router.get("/export")
 def export_entries(
     request: Request,
@@ -74,6 +91,24 @@ def get_entry(entry_id: int) -> dict:
     return entry
 
 
+@router.get("/{entry_id}/snapshot", response_model=dict)
+def get_snapshot(entry_id: int) -> dict:
+    """查看该消费组配置的接收就绪数据快照：配置版本、生效判定与阻塞原因。"""
+    snapshot = service.get_snapshot(entry_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"接入配置 {entry_id} 的接收就绪数据快照不存在")
+    return snapshot
+
+
+@router.put("/{entry_id}/threshold", response_model=ActionResult)
+def update_threshold(entry_id: int, payload: dict[str, object]) -> ActionResult:
+    """修改偏移阈值（批量大小/超时时间）：配置版本递增并重核对快照。"""
+    entry, message = service.update_threshold(entry_id, payload)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry, extra={"snapshot": entry.get("_snapshot")})
+
+
 @router.post("", response_model=ActionResult)
 def create_entry(payload: dict[str, object]) -> ActionResult:
     """登记一条接入配置，缺字段时说明原因而不是静默丢弃。"""
@@ -89,4 +124,4 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     entry, message = service.run_action(entry_id, payload.action.strip())
     if entry is None:
         return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
+    return ActionResult(ok=True, message=message, entry=entry, extra={"snapshot": entry.get("_snapshot")})
